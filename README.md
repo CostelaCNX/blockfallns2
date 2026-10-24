@@ -1,5 +1,7 @@
 # Blockfall for Nintendo Switch 2 (HBLauncher GPU app)
 
+![Blockfall preview](assets/preview.png)
+
 A Tetris-based falling-block puzzle game built as a GPU-compute homebrew app for
 [HBLauncherNS2](https://github.com/CostelaCNX/HBLauncherNS2). All game logic
 and rendering run as GLSL compute/fragment shaders over a shared storage
