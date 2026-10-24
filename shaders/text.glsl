@@ -1,0 +1,10 @@
+const ivec4 TEXT_HOLD = ivec4(2, 2, 63, 16);
+const ivec4 TEXT_NEXT = ivec4(2, 26, 59, 16);
+const ivec4 TEXT_SCORE = ivec4(2, 50, 75, 16);
+const ivec4 TEXT_LINES = ivec4(2, 74, 62, 16);
+const ivec4 TEXT_LEVEL = ivec4(2, 98, 68, 16);
+const ivec4 TEXT_EXIT = ivec4(2, 122, 622, 18);
+const ivec4 TEXT_GAMEOVER = ivec4(2, 148, 387, 49);
+const ivec4 TEXT_RESTART = ivec4(2, 205, 371, 27);
+const ivec4 DIGITS[10] = ivec4[10](ivec4(2, 240, 23, 26), ivec4(2, 274, 23, 26), ivec4(2, 308, 23, 26), ivec4(2, 342, 23, 26), ivec4(2, 376, 23, 26), ivec4(2, 410, 23, 26), ivec4(2, 444, 23, 26), ivec4(2, 478, 23, 26), ivec4(2, 512, 23, 26), ivec4(2, 546, 23, 26));
+const float DIGIT_PITCH = 27.0;

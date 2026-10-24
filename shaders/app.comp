@@ -1,0 +1,200 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x=1) in;
+#include "abi.glsl"
+#include "hb.glsl"
+#include "shapes.glsl"
+
+const float GRAVITY_BASE = 0.80, GRAVITY_STEP = 0.07, GRAVITY_MIN = 0.08;
+const float LOCK_DELAY = 0.5, CLEAR_FLASH = 0.25, DT = 1.0 / 60.0;
+const int MAX_LOCK_RESETS = 15;
+const uint SOUND_MOVE = 1u, SOUND_ROTATE = 2u, SOUND_LOCK = 4u, SOUND_CLEAR = 5u,
+    SOUND_TETRIS = 6u, SOUND_GAMEOVER = 7u, SOUND_HOLD = 8u;
+
+bool cellFilled(int row, int col) {
+    if (col < 0 || col >= BOARD_COLS) return true;
+    if (row >= BOARD_ROWS) return true;
+    if (row < 0) return false;
+    return (c.rows[row] & (1u << uint(col))) != 0u;
+}
+
+bool canPlace(int type, int rotation, int x, int y) {
+    uint mask = shapeMask(type, rotation);
+    for (int lr = 0; lr < 4; lr++) for (int lc = 0; lc < 4; lc++)
+        if (shapeCell(mask, lr, lc) && cellFilled(y + lr, x + lc)) return false;
+    return true;
+}
+
+uint xorshift32(inout uint s) { s ^= s << 13u; s ^= s >> 17u; s ^= s << 5u; return s; }
+
+void shuffleBag(inout uint seed) {
+    for (int i = 0; i < 7; i++) c.bag[i] = uint(i);
+    for (int i = 6; i > 0; i--) {
+        int j = int(xorshift32(seed) % uint(i + 1));
+        uint t = c.bag[i]; c.bag[i] = c.bag[j]; c.bag[j] = t;
+    }
+}
+
+int nextFromBag() {
+    if (c.bagMeta.x >= 7u) { uint seed = c.game.x; shuffleBag(seed); c.game.x = seed; c.bagMeta.x = 0u; }
+    int type = int(c.bag[c.bagMeta.x]);
+    c.bagMeta.x++;
+    return type;
+}
+
+int currentLevel() { return 1 + int(c.game.w) / 10; }
+float gravityInterval() { return max(GRAVITY_MIN, GRAVITY_BASE - GRAVITY_STEP * float(currentLevel() - 1)); }
+
+void triggerGameOver() {
+    c.game.y |= 2u; c.piece.w = -1;
+    hbSound(SOUND_GAMEOVER);
+}
+
+bool spawnPiece() {
+    int type = nextFromBag();
+    c.piece = ivec4(3, 0, 0, type);
+    c.flow.x = 0.0; c.flow.y = 0.0; c.stats.z = 0u; c.bagMeta.z = 0u;
+    if (!canPlace(type, 0, 3, 0)) { triggerGameOver(); return false; }
+    return true;
+}
+
+void lockActivePiece() {
+    uint mask = shapeMask(c.piece.w, c.piece.z);
+    for (int lr = 0; lr < 4; lr++) for (int lc = 0; lc < 4; lc++)
+        if (shapeCell(mask, lr, lc)) {
+            int br = c.piece.y + lr;
+            if (br >= 0 && br < BOARD_ROWS) c.rows[br] |= (1u << uint(c.piece.x + lc));
+        }
+    uint clearedMask = 0u, clearedCount = 0u;
+    for (int r = 0; r < BOARD_ROWS; r++)
+        if ((c.rows[r] & 0x3ffu) == 0x3ffu) { clearedMask |= (1u << uint(r)); clearedCount++; }
+    c.piece.w = -1;
+    if (clearedCount > 0u) {
+        c.events.w = clearedMask; c.flow.z = CLEAR_FLASH;
+        hbSound(clearedCount >= 4u ? SOUND_TETRIS : SOUND_CLEAR);
+    } else {
+        hbSound(SOUND_LOCK);
+        spawnPiece();
+    }
+}
+
+void resolveClearedLines() {
+    uint mask = c.events.w; uint kept[20]; int n = 0;
+    for (int r = 0; r < BOARD_ROWS; r++)
+        if ((mask & (1u << uint(r))) == 0u) kept[n++] = c.rows[r];
+    int cleared = BOARD_ROWS - n;
+    for (int i = 0; i < cleared; i++) c.rows[i] = 0u;
+    for (int i = 0; i < n; i++) c.rows[cleared + i] = kept[i];
+    uint count = uint(cleared);
+    uint add = count == 1u ? 100u : count == 2u ? 300u : count == 3u ? 500u : count >= 4u ? 800u : 0u;
+    c.game.z += add * uint(currentLevel());
+    c.game.w += count;
+    if (c.game.z > c.stats.x) c.stats.x = c.game.z;
+    c.stats.y = uint(currentLevel());
+    c.events.w = 0u; c.flow.z = 0.0;
+    spawnPiece();
+}
+
+void resetLockIfGrounded() {
+    if (c.flow.y > 0.0 && c.stats.z < uint(MAX_LOCK_RESETS)) { c.flow.y = 0.0; c.stats.z++; }
+}
+
+bool tryMove(int dx, int dy) {
+    if (!canPlace(c.piece.w, c.piece.z, c.piece.x + dx, c.piece.y + dy)) return false;
+    c.piece.x += dx; c.piece.y += dy;
+    return true;
+}
+
+void tryRotate(int dir) {
+    int newRot = (c.piece.z + dir + 4) % 4;
+    int kicks[5] = int[5](0, -1, 1, -2, 2);
+    for (int i = 0; i < 5; i++)
+        if (canPlace(c.piece.w, newRot, c.piece.x + kicks[i], c.piece.y)) {
+            c.piece.x += kicks[i]; c.piece.z = newRot;
+            resetLockIfGrounded(); hbSound(SOUND_ROTATE);
+            return;
+        }
+}
+
+void updateGhost() {
+    int gy = c.piece.y;
+    while (canPlace(c.piece.w, c.piece.z, c.piece.x, gy + 1)) gy++;
+    c.stats.w = uint(gy);
+}
+
+void hardDrop() {
+    int dropped = 0;
+    while (tryMove(0, 1)) dropped++;
+    c.game.z += uint(dropped) * 2u;
+    lockActivePiece();
+}
+
+void tryHold() {
+    if (c.bagMeta.z != 0u) return;
+    int current = c.piece.w, held = int(c.bagMeta.y);
+    if (held == 255) { c.bagMeta.y = uint(current); spawnPiece(); }
+    else {
+        c.piece = ivec4(3, 0, 0, held); c.bagMeta.y = uint(current);
+        if (!canPlace(held, 0, 3, 0)) { triggerGameOver(); return; }
+    }
+    c.bagMeta.z = 1u;
+    hbSound(SOUND_HOLD);
+}
+
+void resetGame() {
+    c.game = uvec4((c.state.z | 1u) ^ 0x9e3779b9u, 1u, 0u, 0u);
+    for (int r = 0; r < BOARD_ROWS; r++) c.rows[r] = 0u;
+    c.bagMeta = uvec4(7u, 255u, 0u, 0u);
+    c.stats = uvec4(0u, 1u, 0u, 0u);
+    c.flow = vec4(0.0);
+    c.events.w = 0u;
+    spawnPiece();
+}
+
+void main() {
+    c.motion.x += DT;
+    uint pressed = hbPressed(), held = hbButtons();
+    bool initialized = (c.game.y & 1u) != 0u;
+
+    if (!initialized) { resetGame(); hbEndFrame(); return; }
+
+    if ((c.game.y & 2u) != 0u) {
+        if ((pressed & HB_A) != 0u) resetGame();
+        if (hbConnected() && (pressed & (HB_MINUS | HB_PLUS)) != 0u) hbExit();
+        hbEndFrame(); return;
+    }
+
+    if (hbConnected() && (pressed & (HB_MINUS | HB_PLUS)) != 0u) hbExit();
+
+    if (c.flow.z > 0.0) {
+        c.flow.z -= DT;
+        if (c.flow.z <= 0.0) resolveClearedLines();
+        hbEndFrame(); return;
+    }
+
+    if (c.piece.w >= 0) {
+        if ((pressed & HB_LEFT) != 0u && tryMove(-1, 0)) { resetLockIfGrounded(); hbSound(SOUND_MOVE); }
+        if ((pressed & HB_RIGHT) != 0u && tryMove(1, 0)) { resetLockIfGrounded(); hbSound(SOUND_MOVE); }
+        if ((pressed & (HB_UP | HB_A)) != 0u) tryRotate(1);
+        if ((pressed & HB_B) != 0u) tryRotate(-1);
+        if ((pressed & HB_X) != 0u) tryHold();
+        if (c.piece.w >= 0 && (pressed & HB_Y) != 0u) { hardDrop(); hbEndFrame(); return; }
+
+        bool softDrop = (held & HB_DOWN) != 0u;
+        bool grounded = !canPlace(c.piece.w, c.piece.z, c.piece.x, c.piece.y + 1);
+        if (grounded) {
+            c.flow.y += DT;
+            if (c.flow.y >= LOCK_DELAY) lockActivePiece();
+        } else {
+            c.flow.y = 0.0;
+            c.flow.x += DT;
+            if (c.flow.x >= (softDrop ? min(gravityInterval(), 0.05) : gravityInterval())) {
+                c.flow.x = 0.0; tryMove(0, 1);
+            }
+        }
+        if (c.piece.w >= 0) updateGhost();
+    }
+
+    c.transition.x = max(0.0, c.transition.x - DT * 4.0);
+    hbEndFrame();
+}
